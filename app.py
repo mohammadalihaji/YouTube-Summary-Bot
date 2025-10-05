@@ -3,9 +3,38 @@ from flask import Flask, request, jsonify, render_template_string
 from google import genai
 from google.genai.errors import APIError
 from flask_cors import CORS
+from urllib.parse import urlparse, parse_qs
 
 app = Flask(__name__)
-CORS(app)  # Allow frontend JS to call backend
+CORS(app)
+
+# --- Helper: Normalize YouTube URLs ---
+def normalize_youtube_url(url: str) -> str:
+    """
+    Converts different YouTube URL formats (mobile, short, etc.)
+    into a standard desktop YouTube link.
+    """
+    try:
+        parsed = urlparse(url)
+
+        # youtu.be short link
+        if "youtu.be" in parsed.netloc:
+            video_id = parsed.path.lstrip("/")
+            return f"https://www.youtube.com/watch?v={video_id}"
+
+        # m.youtube.com link
+        if "m.youtube.com" in parsed.netloc:
+            video_id = parse_qs(parsed.query).get("v", [None])[0]
+            if video_id:
+                return f"https://www.youtube.com/watch?v={video_id}"
+
+        # youtube.com with /watch?v=
+        if "youtube.com" in parsed.netloc and "v=" in parsed.query:
+            return url
+
+        return url
+    except Exception:
+        return url
 
 # --- Initialize Gemini Client ---
 try:
@@ -15,7 +44,7 @@ except Exception as e:
     print(f"Error initializing Gemini client: {e}")
     print("FATAL: Ensure GEMINI_API_KEY environment variable is set correctly.")
 
-# --- Function to summarize YouTube video ---
+# --- Summarization Function ---
 def summarize_youtube_video(youtube_url: str):
     """
     Summarizes a YouTube video into 5 bullet points using Gemini API.
@@ -32,37 +61,38 @@ def summarize_youtube_video(youtube_url: str):
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[
-                # YouTube video as file URI
                 genai.types.Part.from_uri(file_uri=youtube_url, mime_type="video/mp4"),
                 prompt
             ],
         )
         return response.text, 200
-
     except APIError as e:
-        error_msg = f"API Error: {e}"
-        print(error_msg)
-        return error_msg, 500
+        return f"API Error: {e}", 500
     except Exception as e:
-        error_msg = f"Unexpected Error: {e}"
-        print(error_msg)
-        return error_msg, 500
+        return f"Unexpected Error: {e}", 500
 
-# --- Route to serve HTML frontend ---
+# --- Serve HTML frontend ---
 @app.route("/", methods=["GET"])
 def index():
-    with open("index.html", "r", encoding="utf-8") as f:
-        html_content = f.read()
-    return render_template_string(html_content)
+    try:
+        with open("index.html", "r", encoding="utf-8") as f:
+            html_content = f.read()
+        return render_template_string(html_content)
+    except FileNotFoundError:
+        return "<h3>index.html not found. Please add it to your project root.</h3>", 404
 
-# --- Route for summarization API ---
+# --- API Route ---
 @app.route("/summarize", methods=["POST"])
 def handle_summarize():
     try:
         data = request.get_json()
         youtube_url = data.get("youtube_link")
+
         if not youtube_url:
             return jsonify({"error": "Missing 'youtube_link' in request."}), 400
+
+        # Normalize before processing
+        youtube_url = normalize_youtube_url(youtube_url)
 
         summary_text, status_code = summarize_youtube_video(youtube_url)
 
@@ -74,9 +104,7 @@ def handle_summarize():
     except Exception as e:
         return jsonify({"error": f"Internal Server Error: {e}"}), 500
 
-# --- Main execution ---
-
+# --- Main ---
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))  # Use Render's port if available
+    port = int(os.environ.get("PORT", 5000))
     app.run(debug=True, host="0.0.0.0", port=port)
-
